@@ -1,0 +1,75 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ── Helper functions ──────────────────────────────────────────────
+    // Gets the authenticated user's role from the users collection.
+    // Costs 1 read per call — acceptable for a small hotel on the free tier.
+    function getUserRole() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role;
+    }
+
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() && getUserRole() == 'admin';
+    }
+
+    function isReceptionist() {
+      return isAuthenticated() && getUserRole() == 'receptionist';
+    }
+
+    function isHousekeeping() {
+      return isAuthenticated() && getUserRole() == 'housekeeping';
+    }
+
+    function isAdminOrReceptionist() {
+      return isAdmin() || isReceptionist();
+    }
+
+    // ── Users ─────────────────────────────────────────────────────────
+    // Admin can read/write all users. Others can only read their own doc.
+    match /users/{userId} {
+      allow read: if isAuthenticated() && (request.auth.uid == userId || isAdmin());
+      allow create, update, delete: if isAdmin();
+    }
+
+    // ── Rooms ─────────────────────────────────────────────────────────
+    // All authenticated users can read rooms (housekeeping needs room info).
+    // Only admin and receptionist can modify rooms.
+    match /rooms/{roomId} {
+      allow read: if isAuthenticated();
+      allow create, update, delete: if isAdminOrReceptionist();
+    }
+
+    // ── Bookings ──────────────────────────────────────────────────────
+    // Admin and receptionist only — housekeeping has no business here.
+    match /bookings/{bookingId} {
+      allow read, write: if isAdminOrReceptionist();
+    }
+
+    // ── Guests ────────────────────────────────────────────────────────
+    // Admin and receptionist only.
+    match /guests/{guestId} {
+      allow read, write: if isAdminOrReceptionist();
+    }
+
+    // ── Housekeeping Tasks ────────────────────────────────────────────
+    // All authenticated users can read (for dashboard stats).
+    // Admin/receptionist can create and delete tasks.
+    // Housekeeping staff can update tasks (change status, add notes).
+    match /housekeepingTasks/{taskId} {
+      allow read: if isAuthenticated();
+      allow create, delete: if isAdminOrReceptionist();
+      allow update: if isAdminOrReceptionist() || isHousekeeping();
+    }
+
+    // ── Invoices ──────────────────────────────────────────────────────
+    // Admin and receptionist only.
+    match /invoices/{invoiceId} {
+      allow read, write: if isAdminOrReceptionist();
+    }
+  }
+}
