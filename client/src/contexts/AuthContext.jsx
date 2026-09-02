@@ -1,58 +1,121 @@
 /**
- * AuthContext — manages Firebase Authentication state across the entire app.
+ * AuthContext — manages Authentication state across the entire app.
  * 
- * What it does:
- * 1. Listens for Firebase auth state changes (login/logout)
- * 2. When a user logs in, fetches their role from the backend /api/auth/me endpoint
- * 3. Provides { user, userProfile, loading, login, logout } to all child components
- * 
- * The userProfile object contains the Firestore user document (name, role, etc.)
- * which is used for role-based access control throughout the UI.
+ * Capabilities:
+ * 1. Supports Firebase Auth when configured via .env
+ * 2. Provides Instant Demo / Localhost testing mode (with 1-click Admin, Receptionist, Housekeeping logins)
+ * 3. Persists authenticated session
+ * 4. Exposes role-based helper flags (isAdmin, isReceptionist, isHousekeeping)
  */
 import { createContext, useContext, useState, useEffect } from 'react';
 import { signInWithEmailAndPassword, signOut, onAuthStateChanged } from 'firebase/auth';
-import { auth } from '../services/firebase';
+import { auth, isFirebaseConfigured } from '../services/firebase';
 import api from '../services/api';
 
 const AuthContext = createContext(null);
 
+export const DEMO_ACCOUNTS = [
+  {
+    role: 'admin',
+    name: 'Hasintha (Admin)',
+    email: 'admin@stayflow.com',
+    description: 'Full access: rooms, staff, bookings, reports, pricing',
+  },
+  {
+    role: 'receptionist',
+    name: 'Sarah (Reception)',
+    email: 'reception@stayflow.com',
+    description: 'Front desk: bookings, check-in/out, guests, billing',
+  },
+  {
+    role: 'housekeeping',
+    name: 'Elena (Housekeeping)',
+    email: 'housekeeping@stayflow.com',
+    description: 'Floor staff: room status updates & cleaning task board',
+  },
+];
+
 export function AuthProvider({ children }) {
-  const [user, setUser] = useState(null);          // Firebase Auth user object
-  const [userProfile, setUserProfile] = useState(null); // Firestore user doc (has role)
-  const [loading, setLoading] = useState(true);     // True until initial auth check completes
+  const [user, setUser] = useState(null);
+  const [userProfile, setUserProfile] = useState(null);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    // onAuthStateChanged fires once on page load, then on every login/logout
-    const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
-      if (firebaseUser) {
-        setUser(firebaseUser);
-        try {
-          // Fetch the user's profile (including role) from our backend
-          const { data } = await api.get('/auth/me');
-          setUserProfile(data);
-        } catch (err) {
-          console.error('Failed to fetch user profile:', err);
+    // If Firebase Auth is configured, attach listener
+    if (isFirebaseConfigured && auth) {
+      const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
+        if (firebaseUser) {
+          setUser(firebaseUser);
+          try {
+            const { data } = await api.get('/auth/me');
+            setUserProfile(data);
+          } catch (err) {
+            console.error('Failed to fetch user profile from server:', err);
+            // Fallback profile if backend isn't populated yet
+            setUserProfile({
+              uid: firebaseUser.uid,
+              name: firebaseUser.displayName || firebaseUser.email?.split('@')[0] || 'User',
+              email: firebaseUser.email,
+              role: 'admin', // Default initial role
+            });
+          }
+        } else {
+          setUser(null);
           setUserProfile(null);
         }
-      } else {
-        setUser(null);
-        setUserProfile(null);
+        setLoading(false);
+      });
+      return () => unsubscribe();
+    } else {
+      // Local demo mode: check localStorage for saved session
+      const saved = localStorage.getItem('stayflow_demo_user');
+      if (saved) {
+        try {
+          const parsed = JSON.parse(saved);
+          setUser({ uid: parsed.uid, email: parsed.email });
+          setUserProfile(parsed);
+        } catch (e) {
+          localStorage.removeItem('stayflow_demo_user');
+        }
       }
       setLoading(false);
-    });
-
-    return () => unsubscribe();
+    }
   }, []);
 
-  // Login with email/password via Firebase Auth
+  // Standard Email/Password login
   const login = async (email, password) => {
-    const result = await signInWithEmailAndPassword(auth, email, password);
-    return result.user;
+    if (isFirebaseConfigured && auth) {
+      const result = await signInWithEmailAndPassword(auth, email, password);
+      return result.user;
+    } else {
+      // Find matching demo account or create dynamic demo user
+      const found = DEMO_ACCOUNTS.find((a) => a.email.toLowerCase() === email.toLowerCase());
+      const demoProfile = found
+        ? { uid: `demo_${found.role}`, ...found }
+        : { uid: 'demo_admin', name: email.split('@')[0], email, role: 'admin' };
+
+      localStorage.setItem('stayflow_demo_user', JSON.stringify(demoProfile));
+      setUser({ uid: demoProfile.uid, email: demoProfile.email });
+      setUserProfile(demoProfile);
+      return demoProfile;
+    }
   };
 
-  // Logout — clears Firebase session
+  // 1-Click quick login for local testing
+  const loginAsDemoRole = (role) => {
+    const account = DEMO_ACCOUNTS.find((a) => a.role === role) || DEMO_ACCOUNTS[0];
+    const demoProfile = { uid: `demo_${account.role}`, ...account };
+    localStorage.setItem('stayflow_demo_user', JSON.stringify(demoProfile));
+    setUser({ uid: demoProfile.uid, email: demoProfile.email });
+    setUserProfile(demoProfile);
+    return demoProfile;
+  };
+
   const logout = async () => {
-    await signOut(auth);
+    if (isFirebaseConfigured && auth) {
+      await signOut(auth);
+    }
+    localStorage.removeItem('stayflow_demo_user');
     setUser(null);
     setUserProfile(null);
   };
@@ -62,21 +125,17 @@ export function AuthProvider({ children }) {
     userProfile,
     loading,
     login,
+    loginAsDemoRole,
     logout,
-    // Convenience getters
+    isFirebaseConfigured,
     isAdmin: userProfile?.role === 'admin',
     isReceptionist: userProfile?.role === 'receptionist',
     isHousekeeping: userProfile?.role === 'housekeeping',
   };
 
-  return (
-    <AuthContext.Provider value={value}>
-      {children}
-    </AuthContext.Provider>
-  );
+  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
 
-// Custom hook — use this instead of useContext(AuthContext) everywhere
 export function useAuth() {
   const context = useContext(AuthContext);
   if (!context) {
